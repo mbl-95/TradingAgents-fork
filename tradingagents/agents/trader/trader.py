@@ -77,7 +77,9 @@ def create_trader(llm):
                     "recommendation of Overweight is a Buy and Underweight is a Sell, "
                     "sized by how strong the case is; conflict alone is not a Hold.\n"
                     "- **Reasoning**: why, against the plan and the price structure\n"
-                    "- **Entry Price**, **Stop Loss**, **Position Sizing**: when you can state them"
+                    "- **Entry Price**, **Stop Loss**, **Position Sizing**: when you can state them\n"
+                    "- **Entry Zone**: when the market report names price zones by label (e.g. D1), "
+                    "the label of the zone your entry sits in"
                 ),
             },
         ]

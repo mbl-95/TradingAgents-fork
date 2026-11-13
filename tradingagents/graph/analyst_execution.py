@@ -1,7 +1,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from tradingagents.agents.analysts import fundamentals_analyst, market_analyst, news_analyst
+from tradingagents.agents.analysts import fundamentals_analyst, market_analyst, news_analyst, valuation_analyst
 
 
 @dataclass(frozen=True)
@@ -10,6 +10,8 @@ class AnalystNodeSpec:
     agent_node: str
     report_key: str
     tools: tuple = ()
+    # Where the report's structured data goes (structured_analyst_reports); None when it has none.
+    data_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,7 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         agent_node="Market Analyst",
         report_key="market_report",
         tools=market_analyst.TOOLS,
+        data_key="market_report_data",
     ),
     "social": AnalystNodeSpec(
         # Saved configs select this analyst as "social". It fetches its
@@ -36,12 +39,22 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         agent_node="News Analyst",
         report_key="news_report",
         tools=news_analyst.TOOLS,
+        data_key="news_report_data",
     ),
     "fundamentals": AnalystNodeSpec(
         key="fundamentals",
         agent_node="Fundamentals Analyst",
         report_key="fundamentals_report",
         tools=fundamentals_analyst.TOOLS,
+        data_key="fundamentals_report_data",
+    ),
+    "valuation": AnalystNodeSpec(
+        # Opt-in: not in the default selection.
+        key="valuation",
+        agent_node="Valuation Analyst",
+        report_key="valuation_report",
+        tools=valuation_analyst.TOOLS,
+        data_key="valuation_report_data",
     ),
 }
 

@@ -18,6 +18,7 @@ class Propagator:
         past_context: str = "",
         instrument_context: str = "",
         portfolio_context: str = "",
+        prior_thesis: str = "",
     ) -> dict[str, Any]:
         """Create the initial state for the agent graph.
 
@@ -36,6 +37,7 @@ class Propagator:
             "past_context": past_context,
             "memory_note": "",
             "portfolio_context": portfolio_context,
+            "prior_thesis": prior_thesis,
             "investment_debate_state": InvestDebateState(
                 {
                     "bull_history": "",
@@ -62,6 +64,12 @@ class Propagator:
             "fundamentals_report": "",
             "sentiment_report": "",
             "news_report": "",
+            "valuation_report": "",
+            "market_report_data": None,
+            "news_report_data": None,
+            "fundamentals_report_data": None,
+            "valuation_report_data": None,
+            "final_decision_data": None,
         }
 
     def get_graph_args(self, callbacks: list | None = None) -> dict[str, Any]:

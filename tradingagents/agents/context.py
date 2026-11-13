@@ -216,3 +216,25 @@ def get_portfolio_context_from_state(state: Mapping[str, Any]) -> str:
         "holdings or cash, so do not assume a flat book; give direction and "
         "sizing guidance in terms the caller can apply to their own position."
     )
+
+
+def optional_report_line(state: Mapping[str, Any], key: str, label: str) -> str:
+    """A labelled report line for an opt-in analyst, or nothing when it did not run.
+
+    Unlike ``report_or_absent`` the line disappears entirely, so a run without
+    the analyst sends exactly the prompt it sent before the analyst existed.
+    """
+    text = (state.get(key) or "").strip()
+    return f"{label}: {text}\n" if text else ""
+
+
+def get_prior_thesis_from_state(state: Mapping[str, Any]) -> str:
+    """The caller's previous thesis, or an explicit marker that this is a first view.
+
+    Without the marker a judge asked to compare against "the prior thesis" would
+    invent one; with it, every pillar is new.
+    """
+    thesis = state.get("prior_thesis")
+    if isinstance(thesis, str) and thesis.strip():
+        return f"Prior thesis (the view this run is compared against):\n{thesis.strip()}"
+    return "Prior thesis: none was given; this is a first view, so every pillar is new."

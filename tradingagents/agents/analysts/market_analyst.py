@@ -1,6 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from tradingagents.agents.analysts.structure import no_structure, report_structurer
 from tradingagents.agents.analysts.turn import take_turn
+from tradingagents.agents.schemas import MarketReport, render_market_report
 from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
 from tradingagents.agents.tools import get_indicators, get_stock_data, get_verified_market_snapshot
 
@@ -12,7 +14,11 @@ TOOLS = (
 )
 
 
-def create_market_analyst(llm):
+def create_market_analyst(llm, tools=TOOLS, structured: bool = False):
+    """``tools`` replaces the default set (a caller adds its own through ``extra_tools``);
+    ``structured`` adds the report's data (see ``analysts/structure.py``)."""
+    structure = report_structurer(llm, MarketReport, render_market_report, "Market Analyst") if structured else no_structure
+
 
     def market_analyst_node(state):
         current_date = state["trade_date"]
@@ -49,6 +55,10 @@ Before writing the final report, call get_verified_market_snapshot for this tick
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+            # Only with a caller's relative-performance tool: without one the prompt is unchanged.
+            + (" Before calling a move stock-specific, compare it with the sector and the market using"
+               " get_relative_performance, and say whether it is stock-specific, sector-wide or market-wide."
+               if any(t.name == "get_relative_performance" for t in tools) else "")
             + get_language_instruction()
         )
 
@@ -70,15 +80,17 @@ Write a very detailed and nuanced report of the trends you observe. Provide spec
         )
 
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in TOOLS]))
+        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        result, report = take_turn(prompt, llm, TOOLS, state["messages"])
+        result, report = take_turn(prompt, llm, tools, state["messages"])
+        report, data = structure(report)
 
         return {
             "messages": [result],
             "market_report": report,
+            "market_report_data": data,
         }
 
     return market_analyst_node
