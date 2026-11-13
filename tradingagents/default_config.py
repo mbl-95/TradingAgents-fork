@@ -135,6 +135,9 @@ def build_default_config() -> dict:
         "max_recur_limit": 100,
         # Rounds of tool calls an analyst may make before it is asked for its report.
         "max_tool_rounds": 20,
+        # Add structured data to the Market, News, Fundamentals and Valuation reports: one short
+        # structured call per report reads it after it is written (agents/analysts/structure.py).
+        "structured_analyst_reports": False,
         # News / data fetching parameters
         # Increase for longer lookback strategies or to broaden macro coverage;
         # decrease to reduce token usage in agent prompts.

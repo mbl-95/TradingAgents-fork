@@ -19,6 +19,7 @@ from tradingagents.agents import (
     create_research_manager,
     create_sentiment_analyst,
     create_trader,
+    create_valuation_analyst,
 )
 from tradingagents.agents.analysts.turn import WRAP_UP
 from tradingagents.agents.state import AgentState
@@ -50,7 +51,13 @@ def _tools_or_done(state) -> str:
     return "tools" if state["messages"][-1].tool_calls else END
 
 
-def _analyst_graph(spec, agent, max_tool_rounds: int):
+def merge_tools(base, extra) -> tuple:
+    """The analyst's tools plus a caller's, one per name; a caller's tool replaces a default of the same name."""
+    names = {t.name for t in extra}
+    return tuple(t for t in base if t.name not in names) + tuple(extra)
+
+
+def _analyst_graph(spec, agent, max_tool_rounds: int, tools: tuple | None = None):
     """One analyst as a graph of its own: the model and its tools, on a private message history.
 
     It returns only its report, so analysts running side by side never write the
@@ -59,11 +66,13 @@ def _analyst_graph(spec, agent, max_tool_rounds: int):
     that turn ends it whatever it answers, so a model that keeps calling tools
     cannot run the graph into its recursion limit (#1420).
     """
-    output = TypedDict(f"{spec.key.capitalize()}Report", {spec.report_key: str})
+    tools = spec.tools if tools is None else tools
+    fields = {spec.report_key: str, **({spec.data_key: dict | None} if spec.data_key else {})}
+    output = TypedDict(f"{spec.key.capitalize()}Report", fields)
     graph = StateGraph(AgentState, output_schema=output)
     graph.add_node("agent", agent)
     graph.add_edge(START, "agent")
-    if not spec.tools:
+    if not tools:
         graph.add_edge("agent", END)
         return graph.compile()
 
@@ -82,7 +91,7 @@ def _analyst_graph(spec, agent, max_tool_rounds: int):
                        spec.agent_node, max_tool_rounds, repeated)
         return agent({**state, "messages": [*state["messages"], HumanMessage(WRAP_UP)]})
 
-    graph.add_node("tools", ToolNode(list(spec.tools)))
+    graph.add_node("tools", ToolNode(list(tools)))
     graph.add_node("wrap_up", wrap_up)
     graph.add_conditional_edges("agent", _tools_or_done, ["tools", END])
     graph.add_conditional_edges("tools", more_or_wrap_up, ["agent", "wrap_up"])
@@ -107,7 +116,8 @@ class GraphSetup:
         self.max_tool_rounds = max_tool_rounds
 
     def setup_graph(
-        self, selected_analysts=("market", "social", "news", "fundamentals"), memory_node=None
+        self, selected_analysts=("market", "social", "news", "fundamentals"), memory_node=None,
+        extra_tools=None, structured_reports: bool = False,
     ):
         """Set up and compile the agent workflow graph.
 
@@ -119,14 +129,24 @@ class GraphSetup:
                 - "fundamentals": Fundamentals analyst
             memory_node: Node that settles past decisions and returns the run's
                 ``past_context``. It runs alongside the analysts.
+            extra_tools: Caller tools per analyst key, e.g. ``{"news": [web_search]}``, added to
+                the analyst's own (a same-named one replaces the default).
+            structured_reports: Add each report's structured data (``*_report_data``).
         """
         plan = build_analyst_execution_plan(selected_analysts)
 
+        extra_tools = extra_tools or {}
+        unknown = set(extra_tools) - {spec.key for spec in plan.specs if spec.tools}
+        if unknown:
+            raise ValueError(f"extra_tools for analysts without a tool loop or not selected: {sorted(unknown)}")
+        tools = {spec.key: merge_tools(spec.tools, extra_tools.get(spec.key, ())) for spec in plan.specs}
+        quick, s = self.quick_thinking_llm, structured_reports
         analyst_factories = {
-            "market": lambda: create_market_analyst(self.quick_thinking_llm),
-            "social": lambda: create_sentiment_analyst(self.quick_thinking_llm),
-            "news": lambda: create_news_analyst(self.quick_thinking_llm),
-            "fundamentals": lambda: create_fundamentals_analyst(self.quick_thinking_llm),
+            "market": lambda: create_market_analyst(quick, tools["market"], s),
+            "social": lambda: create_sentiment_analyst(quick),
+            "news": lambda: create_news_analyst(quick, tools["news"], s),
+            "fundamentals": lambda: create_fundamentals_analyst(quick, tools["fundamentals"], s),
+            "valuation": lambda: create_valuation_analyst(quick, tools["valuation"], s),
         }
 
         bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
@@ -143,7 +163,8 @@ class GraphSetup:
 
         for spec in plan.specs:
             workflow.add_node(spec.agent_node,
-                              _analyst_graph(spec, analyst_factories[spec.key](), self.max_tool_rounds))
+                              _analyst_graph(spec, analyst_factories[spec.key](), self.max_tool_rounds,
+                                             tools[spec.key]))
 
         workflow.add_node("Bull Researcher", bull_researcher_node)
         workflow.add_node("Bear Researcher", bear_researcher_node)

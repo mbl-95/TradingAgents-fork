@@ -1,6 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from tradingagents.agents.analysts.structure import no_structure, report_structurer
 from tradingagents.agents.analysts.turn import take_turn
+from tradingagents.agents.schemas import FundamentalsReport, render_fundamentals_report
 from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
 from tradingagents.agents.tools import (
     get_balance_sheet,
@@ -20,7 +22,11 @@ TOOLS = (
 )
 
 
-def create_fundamentals_analyst(llm):
+def create_fundamentals_analyst(llm, tools=TOOLS, structured: bool = False):
+    """``tools`` replaces the default set (a caller adds its own through ``extra_tools``);
+    ``structured`` adds the report's data (see ``analysts/structure.py``)."""
+    structure = report_structurer(llm, FundamentalsReport, render_fundamentals_report, "Fundamentals Analyst") if structured else no_structure
+
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = get_instrument_context_from_state(state)
@@ -50,15 +56,17 @@ def create_fundamentals_analyst(llm):
         )
 
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in TOOLS]))
+        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        result, report = take_turn(prompt, llm, TOOLS, state["messages"])
+        result, report = take_turn(prompt, llm, tools, state["messages"])
+        report, data = structure(report)
 
         return {
             "messages": [result],
             "fundamentals_report": report,
+            "fundamentals_report_data": data,
         }
 
     return fundamentals_analyst_node

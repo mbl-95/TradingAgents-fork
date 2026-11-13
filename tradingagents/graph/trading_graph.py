@@ -57,6 +57,7 @@ class TradingAgentsGraph:
         debug=False,
         config: dict[str, Any] = None,
         callbacks: list | None = None,
+        extra_tools: dict | None = None,
     ):
         """Initialize the trading agents graph and components.
 
@@ -65,6 +66,8 @@ class TradingAgentsGraph:
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
+            extra_tools: Caller tools per analyst key, e.g. ``{"news": [web_search]}``, added to
+                that analyst's own tools. Async tools need the graph run with ``astream``.
         """
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
@@ -109,7 +112,12 @@ class TradingAgentsGraph:
         self.selected_analysts = tuple(selected_analysts)
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
-        self.workflow = self.graph_setup.setup_graph(selected_analysts, memory_node=self._memory_step)
+        # Graph-shape-affecting too: the tool set an analyst may call.
+        self.extra_tool_names = {k: sorted(t.name for t in v) for k, v in (extra_tools or {}).items()}
+        self.workflow = self.graph_setup.setup_graph(
+            selected_analysts, memory_node=self._memory_step, extra_tools=extra_tools,
+            structured_reports=bool(self.config.get("structured_analyst_reports")),
+        )
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
         self._resuming = False
@@ -151,6 +159,7 @@ class TradingAgentsGraph:
         digest = hashlib.sha256(json.dumps(settings, sort_keys=True, default=str).encode()).hexdigest()[:12]
         return "|".join([
             "analysts=" + ",".join(self.selected_analysts),
+            *([f"extra_tools={json.dumps(extra, sort_keys=True)}"] if (extra := getattr(self, "extra_tool_names", None)) else []),
             f"debate={self.config['max_debate_rounds']}",
             f"risk={self.config['max_risk_discuss_rounds']}",
             f"asset={asset_type}",
@@ -164,7 +173,8 @@ class TradingAgentsGraph:
             f"settings={digest}",
         ])
 
-    def propagate(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
+    def propagate(self, company_name, trade_date, asset_type: str = "stock", portfolio=None,
+                  prior_thesis: str = ""):
         """Run the trading agents graph for a company on a specific date.
 
         ``asset_type`` selects between the stock pipeline (default) and the
@@ -186,7 +196,7 @@ class TradingAgentsGraph:
                 self.checkpoint_scope(company_name, trade_date, asset_type, portfolio) as thread_id_value:
             return self._run_graph(
                 company_name, trade_date, asset_type=asset_type,
-                checkpoint_thread_id=thread_id_value, portfolio=portfolio,
+                checkpoint_thread_id=thread_id_value, portfolio=portfolio, prior_thesis=prior_thesis,
             )
 
     def begin_checkpoint(self, company_name, trade_date, asset_type: str = "stock", portfolio=None) -> str | None:
@@ -290,12 +300,16 @@ class TradingAgentsGraph:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return Path(self.config["results_dir"]) / "reports" / f"{safe_ticker_component(ticker)}_{stamp}"
 
-    def create_run_state(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
+    def create_run_state(self, company_name, trade_date, asset_type: str = "stock", portfolio=None,
+                         prior_thesis: str = ""):
         """Build a run's initial state; propagate() and the CLI both start here.
 
         Injects the resolved instrument identity for every agent (#814). The
         memory log's lessons are not here: the graph's Memory Log step settles
         and loads them alongside the analysts (see ``_memory_step``).
+
+        ``prior_thesis`` is the caller's rendering of the previous thesis (date, rating,
+        one line per pillar); the Research Manager and Portfolio Manager judge against it.
         """
         return self.propagator.create_initial_state(
             company_name,
@@ -303,6 +317,7 @@ class TradingAgentsGraph:
             asset_type=asset_type,
             instrument_context=self.resolve_instrument_context(company_name, asset_type, trade_date),
             portfolio_context=portfolio.render(company_name) if portfolio is not None else "",
+            prior_thesis=prior_thesis,
         )
 
     def _memory_step(self, state):
@@ -370,9 +385,9 @@ class TradingAgentsGraph:
         )
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock",
-                   checkpoint_thread_id: str | None = None, portfolio=None):
+                   checkpoint_thread_id: str | None = None, portfolio=None, prior_thesis: str = ""):
         """Execute the graph and write the resulting state to disk and memory log."""
-        init_agent_state = self.create_run_state(company_name, trade_date, asset_type, portfolio)
+        init_agent_state = self.create_run_state(company_name, trade_date, asset_type, portfolio, prior_thesis)
         args = self.propagator.get_graph_args()
 
         # Inject the checkpoint thread_id (from checkpoint_scope) so the same
@@ -443,6 +458,7 @@ class TradingAgentsGraph:
             "sentiment_report": final_state["sentiment_report"],
             "news_report": final_state["news_report"],
             "fundamentals_report": final_state["fundamentals_report"],
+            **({"valuation_report": final_state["valuation_report"]} if final_state.get("valuation_report") else {}),
             "investment_debate_state": {
                 "bull_history": final_state["investment_debate_state"]["bull_history"],
                 "bear_history": final_state["investment_debate_state"]["bear_history"],

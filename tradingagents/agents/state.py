@@ -53,6 +53,12 @@ class AgentState(MessagesState):
     sentiment_report: Annotated[str, "Report from the Sentiment Analyst"]
     news_report: Annotated[str, "Report from the News Analyst on company and world news"]
     fundamentals_report: Annotated[str, "Report from the Fundamentals Analyst"]
+    valuation_report: Annotated[str, "Report from the Valuation Analyst; empty when it is not selected"]
+    # Structured data of each report (structured_analyst_reports), None when off or on free-text fallback.
+    market_report_data: Annotated[dict | None, "MarketReport fields"]
+    news_report_data: Annotated[dict | None, "NewsReport fields"]
+    fundamentals_report_data: Annotated[dict | None, "FundamentalsReport fields"]
+    valuation_report_data: Annotated[dict | None, "ValuationReport fields"]
 
     # researcher team discussion step
     investment_debate_state: Annotated[
@@ -68,6 +74,8 @@ class AgentState(MessagesState):
     ]
     final_trade_decision: Annotated[str, "Final decision from the Portfolio Manager"]
     final_rating: Annotated[str, "The Portfolio Manager's 5-tier rating, or REVIEW when it has none"]
+    final_decision_data: Annotated[dict | None, "The PortfolioDecision fields, None on free-text fallback"]
     past_context: Annotated[str, "Memory log context for the Portfolio Manager (same-ticker decisions + cross-ticker lessons), written by the Memory Log step"]
     memory_note: Annotated[str, "What the Memory Log step could not settle or read this run, for the report; empty when all went well"]
     portfolio_context: Annotated[str, "Caller-supplied holdings and cash, rendered at run start; empty when not provided"]
+    prior_thesis: Annotated[str, "Caller-supplied previous thesis (date, rating, pillars), rendered at run start; empty when not provided"]

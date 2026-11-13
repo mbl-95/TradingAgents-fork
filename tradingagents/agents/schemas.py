@@ -181,6 +181,14 @@ class TraderProposal(BaseModel):
         default=None,
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
+    entry_zone_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional: when the market report names price zones by label (e.g. 'D1' for a demand "
+            "zone), the label of the zone the entry sits in. Omit it when the report names no zones "
+            "or the entry is not in one."
+        ),
+    )
 
     @field_validator("entry_price", "stop_loss", mode="before")
     @classmethod
@@ -206,6 +214,9 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
                          ("Stop Loss", proposal.stop_loss),
                          ("Position Sizing", proposal.position_sizing)):
         parts.extend(["", f"**{label}**: {value if value is not None and value != '' else 'not provided'}"])
+    # Only when given: most callers have no zones, and their reports stay as they were.
+    if proposal.entry_zone_id:
+        parts.extend(["", f"**Entry Zone**: {proposal.entry_zone_id}"])
     parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
@@ -216,6 +227,41 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
 # ---------------------------------------------------------------------------
 # Portfolio Manager
 # ---------------------------------------------------------------------------
+
+
+class ThesisPillar(BaseModel):
+    """One claim the rating rests on."""
+
+    name: str = Field(description="A short name, e.g. 'Data-center demand'.")
+    statement: str = Field(description="The claim, in one sentence.")
+    evidence: str = Field(description="The evidence from the analysts that supports it now.")
+    status: Literal["new", "intact", "weakened", "broken"] = Field(
+        description="Against the prior thesis: new when it had no such pillar or there is no prior thesis.",
+    )
+    kill_criterion: str = Field(description="What observable fact would prove the pillar wrong.")
+
+
+class ChangeDriver(StrEnum):
+    COMPANY_FUNDAMENTALS = "company_fundamentals"
+    COMPANY_NEWS = "company_news"
+    SECTOR_CONTAGION = "sector_contagion"
+    MACRO = "macro"
+    SENTIMENT_FLOW = "sentiment_flow"
+    TECHNICAL = "technical"
+    NO_CHANGE = "no_change"
+
+
+class MoveAssessment(StrEnum):
+    JUSTIFIED = "justified"
+    OVERREACTION = "overreaction"
+    UNDERREACTION = "underreaction"
+    UNCLEAR = "unclear"
+
+
+class MarketConcern(BaseModel):
+    concern: str = Field(description="What worried investors fear.")
+    applies_to_company: Literal["yes", "partly", "no"]
+    reasoning: str
 
 
 class PortfolioDecision(BaseModel):
@@ -258,6 +304,33 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    # The thesis in structure. All optional: a provider that drops them still
+    # validates, and a decision without them renders exactly as before.
+    thesis_pillars: list[ThesisPillar] = Field(
+        default_factory=list,
+        description="The two to five claims the rating rests on, each with what would prove it wrong.",
+    )
+    change_driver: ChangeDriver | None = Field(
+        default=None,
+        description=(
+            "The main reason the view differs from the prior thesis; no_change when it does not or "
+            "when there is no prior thesis."
+        ),
+    )
+    move_assessment: MoveAssessment | None = Field(
+        default=None,
+        description="Whether the recent price move is in proportion to what changed in the business.",
+    )
+    market_concern: MarketConcern | None = Field(
+        default=None, description="What worried investors fear, and whether it applies to this company.",
+    )
+    opportunity_note: str | None = Field(
+        default=None,
+        description=(
+            "Only when move_assessment is overreaction: what would make the lower price attractive, "
+            "and what would invalidate that. A generic signal, never advice about a position."
+        ),
+    )
 
     @field_validator("price_target", mode="before")
     @classmethod
@@ -285,6 +358,22 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     target = decision.price_target if decision.price_target is not None else "not provided"
     parts.extend(["", f"**Price Target**: {target}"])
     parts.extend(["", f"**Time Horizon**: {decision.time_horizon or 'not provided'}"])
+    # Appended after every existing section, and only when given, so the
+    # existing headers and their parsers are untouched.
+    if decision.thesis_pillars:
+        pillars = [f"- {p.name} ({p.status}): {p.statement} Evidence: {p.evidence} "
+                   f"Wrong if: {p.kill_criterion}" for p in decision.thesis_pillars]
+        parts.extend(["", "**Thesis Pillars**:", *pillars])
+    if decision.change_driver is not None:
+        parts.extend(["", f"**Change Driver**: {decision.change_driver.value}"])
+    if decision.move_assessment is not None:
+        parts.extend(["", f"**Move Assessment**: {decision.move_assessment.value}"])
+    if decision.market_concern is not None:
+        c = decision.market_concern
+        parts.extend(["", f"**Market Concern**: {c.concern} Applies to the company: {c.applies_to_company}. "
+                          f"{c.reasoning}"])
+    if decision.opportunity_note:
+        parts.extend(["", f"**Opportunity**: {decision.opportunity_note}"])
     return "\n".join(parts)
 
 
@@ -376,4 +465,189 @@ def render_sentiment_report(report: SentimentReport) -> str:
         f"**Confidence:** {report.confidence.capitalize()}",
         "",
         report.narrative,
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Analyst report data (opt-in: config["structured_analyst_reports"])
+# ---------------------------------------------------------------------------
+#
+# The Market, News, Fundamentals and Valuation analysts keep writing prose in
+# their tool loop. With structured reports on, one short structured call reads
+# the finished report and fills these fields; the prose is kept as written and
+# the render helpers put a header above it. So these schemas carry no narrative
+# field: the model is asked only for what prose does not keep consistent from
+# run to run. Lists default to empty, so a thin report still validates.
+
+
+class MoveScope(StrEnum):
+    STOCK_SPECIFIC = "stock_specific"
+    SECTOR_WIDE = "sector_wide"
+    MARKET_WIDE = "market_wide"
+    NO_NOTABLE_MOVE = "no_notable_move"
+
+
+class Trend(StrEnum):
+    UP = "up"
+    DOWN = "down"
+    SIDEWAYS = "sideways"
+
+
+class KeyLevel(BaseModel):
+    level: float | None = Field(description="The price level, an absolute number in the quote currency.")
+    kind: Literal["support", "resistance", "moving_average"] = Field(description="What the level is.")
+    status: Literal["holding", "broken", "reclaimed"] = Field(description="How price is treating it now.")
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def _level(cls, v):
+        return _coerce_optional_float(v)
+
+
+def _percent(value):
+    """A percentage field may arrive as "12.5%"; unlike a price, the sign is the unit, so keep the number."""
+    if isinstance(value, str) and value.strip().endswith("%"):
+        value = value.strip()[:-1]
+    return _coerce_optional_float(value)
+
+
+class MarketReport(BaseModel):
+    """What the Market Analyst's report says about the move and the levels."""
+
+    move_scope: MoveScope = Field(
+        description=(
+            "Where the recent move comes from, as the report judges it against the sector and the market: "
+            "stock_specific, sector_wide, market_wide, or no_notable_move. When the report does not "
+            "compare the stock with its sector or the market, use no_notable_move unless it calls the "
+            "move company-specific itself."
+        ),
+    )
+    excess_return_1m_vs_sector: float | None = Field(
+        default=None,
+        description="The stock's one-month return minus its sector's, in percent, only if the report states it.",
+    )
+    trend: Trend = Field(description="The prevailing trend on the daily chart according to the report.")
+    key_levels: list[KeyLevel] = Field(
+        default_factory=list, description="The price levels the report's argument relies on, at most five.",
+    )
+
+    @field_validator("excess_return_1m_vs_sector", mode="before")
+    @classmethod
+    def _excess(cls, v):
+        return _percent(v)
+
+
+class CompanyEvent(BaseModel):
+    headline: str
+    date: str | None = Field(default=None, description="YYYY-MM-DD when the report gives it.")
+    source: str | None = None
+    category: Literal["earnings", "guidance", "product", "customer", "legal", "management", "capital", "other"]
+    direction: Literal["positive", "negative", "neutral"]
+    materiality: Literal["low", "medium", "high"]
+
+
+class ExternalTheme(BaseModel):
+    theme: str = Field(description="A sector or macro story, e.g. 'AI infrastructure debt financing'.")
+    description: str
+    channel: Literal["demand", "funding_cost", "multiple_compression", "supply_chain", "regulation",
+                     "sentiment_flow"] = Field(description="How the theme reaches the company.")
+    exposure: Literal["direct", "indirect", "none"] = Field(
+        description="The company's real exposure, judged from its own business, not from how the stock trades.",
+    )
+    direction: Literal["positive", "negative", "neutral"]
+
+
+class NewsReport(BaseModel):
+    """The News Analyst's report, split into news about the company and the stories around it."""
+
+    company_events: list[CompanyEvent] = Field(default_factory=list, description="News about the company itself.")
+    external_themes: list[ExternalTheme] = Field(
+        default_factory=list,
+        description="Sector and macro stories that can move this stock without being about it.",
+    )
+
+
+class Metric(BaseModel):
+    name: str = Field(description="e.g. revenue growth, gross margin, free cash flow, net debt / EBITDA, forward P/E.")
+    value: str = Field(description="The value as the report states it, with its unit.")
+    period: str | None = Field(default=None, description="e.g. 'Q3 FY26' or 'TTM'.")
+    change_vs_prior: str | None = Field(default=None, description="The change against the prior period, if stated.")
+
+
+class QualityFlag(BaseModel):
+    flag: str = Field(description="e.g. balance sheet, cash conversion, customer concentration, dilution.")
+    direction: Literal["improving", "deteriorating", "stable"]
+
+
+class FundamentalsReport(BaseModel):
+    """The handful of numbers the Fundamentals Analyst's report argues from."""
+
+    metrics: list[Metric] = Field(default_factory=list, description="The numbers the report argues from, at most eight.")
+    quality_flags: list[QualityFlag] = Field(default_factory=list)
+    fundamentals_changed: bool = Field(
+        default=False,
+        description="True when a reported number changed since the last filing in a way that matters to an investment case.",
+    )
+
+
+class ValuationStance(StrEnum):
+    UNDERVALUED = "undervalued"
+    FAIR = "fair"
+    OVERVALUED = "overvalued"
+    UNCLEAR = "unclear"
+
+
+class ValuationReport(BaseModel):
+    """The Valuation Analyst's view in three lines."""
+
+    stance: ValuationStance = Field(
+        description="Whether the price is below, at or above what the valuation evidence supports; unclear when the data is too thin.",
+    )
+    key_gap: str = Field(
+        description="The one gap that matters most, e.g. price vs the base case, the multiple vs its own history, guidance vs consensus.",
+    )
+    what_would_change_it: str = Field(description="What would move the stance, stated as something observable.")
+
+
+def _bullets(rows: list[str]) -> list[str]:
+    return [f"- {r}" for r in rows] if rows else ["- none"]
+
+
+def render_market_report(data: MarketReport, narrative: str) -> str:
+    levels = [f"{k.kind.replace('_', ' ')} {k.level:g} ({k.status})" for k in data.key_levels if k.level is not None]
+    excess = (f"{data.excess_return_1m_vs_sector:+.1f}%" if data.excess_return_1m_vs_sector is not None
+              else "not stated")
+    return "\n".join([
+        f"**Move Scope**: {data.move_scope.value}",
+        f"**Excess Return 1M vs Sector**: {excess}",
+        f"**Trend**: {data.trend.value}",
+        f"**Key Levels**: {'; '.join(levels) if levels else 'none'}",
+        "",
+        narrative,
+    ])
+
+
+def render_news_report(data: NewsReport, narrative: str) -> str:
+    events = [f"{e.headline} ({e.category}, {e.direction}, {e.materiality})" for e in data.company_events]
+    themes = [f"{t.theme} ({t.channel}, exposure {t.exposure}, {t.direction})" for t in data.external_themes]
+    return "\n".join(["**Company Events**:", *_bullets(events), "", "**External Themes**:", *_bullets(themes),
+                      "", narrative])
+
+
+def render_fundamentals_report(data: FundamentalsReport, narrative: str) -> str:
+    metrics = [f"{m.name}: {m.value}" + (f" ({m.period})" if m.period else "") for m in data.metrics]
+    flags = [f"{f.flag}: {f.direction}" for f in data.quality_flags]
+    return "\n".join([
+        f"**Fundamentals Changed**: {'yes' if data.fundamentals_changed else 'no'}",
+        "**Key Metrics**:", *_bullets(metrics), "", "**Quality Flags**:", *_bullets(flags), "", narrative,
+    ])
+
+
+def render_valuation_report(data: ValuationReport, narrative: str) -> str:
+    return "\n".join([
+        f"**Valuation Stance**: {data.stance.value}",
+        f"**Key Gap**: {data.key_gap}",
+        f"**What Would Change It**: {data.what_would_change_it}",
+        "",
+        narrative,
     ])
